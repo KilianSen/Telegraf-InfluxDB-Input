@@ -198,7 +198,7 @@ type MetricData struct {
 // convertRowToMetric converts a query result row into a metric
 func (i *InfluxDBInput) convertRowToMetric(row map[string]interface{}) *MetricData {
 	metric := &MetricData{
-		Name:   "influxdb_query",
+		Name:   "influxdb3_query_result",
 		Fields: make(map[string]interface{}),
 		Tags:   make(map[string]string),
 		Time:   time.Now(),
@@ -226,11 +226,22 @@ func (i *InfluxDBInput) convertRowToMetric(row map[string]interface{}) *MetricDa
 	}
 
 	// Separate tags and fields
+	// InfluxDB convention: 
+	// - String values are typically tags (metadata)
+	// - Numeric, boolean, and special field values are fields (measurements)
+	// - Fields starting with underscore (except _measurement) are special fields
 	for key, value := range row {
-		// Treat string values as tags, others as fields
-		if strVal, ok := value.(string); ok && !strings.HasPrefix(key, "_") {
+		// Skip if key starts with underscore (special fields like _field, _value)
+		// but still add them as fields to preserve data
+		if strings.HasPrefix(key, "_") {
+			if value != nil {
+				metric.Fields[key] = value
+			}
+		} else if strVal, ok := value.(string); ok {
+			// String values become tags
 			metric.Tags[key] = strVal
 		} else {
+			// Numeric, boolean, and other types become fields
 			metric.Fields[key] = value
 		}
 	}
