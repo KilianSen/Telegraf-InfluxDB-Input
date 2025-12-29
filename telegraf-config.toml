@@ -1,0 +1,90 @@
+# Telegraf Configuration for InfluxDB3 Input Plugin
+
+# Global tags can be specified here
+[global_tags]
+  # dc = "us-east-1"
+
+# Configuration for telegraf agent
+[agent]
+  ## Default data collection interval for all inputs
+  interval = "10s"
+  
+  ## Rounds collection interval to 'interval'
+  round_interval = true
+  
+  ## Telegraf will send metrics to outputs in batches of at most
+  ## metric_batch_size metrics.
+  metric_batch_size = 1000
+  
+  ## Maximum number of unwritten metrics per output.
+  metric_buffer_limit = 10000
+  
+  ## Collection jitter is used to jitter the collection by a random amount.
+  collection_jitter = "0s"
+  
+  ## Default flushing interval for all outputs.
+  flush_interval = "10s"
+  
+  ## Jitter the flush interval by a random amount.
+  flush_jitter = "0s"
+  
+  ## Precision to use for timestamps
+  precision = "0s"
+  
+  ## Log at debug level.
+  debug = false
+  
+  ## Log only error level messages.
+  quiet = false
+  
+  ## Override default hostname, if empty use os.Hostname()
+  hostname = ""
+
+###############################################################################
+#                            OUTPUT PLUGINS                                   #
+###############################################################################
+
+# Send metrics to InfluxDB v2/v3
+[[outputs.influxdb_v2]]
+  ## The URLs of the InfluxDB cluster nodes.
+  urls = ["http://localhost:8086"]
+  
+  ## Token for authentication.
+  token = "$INFLUXDB_TOKEN"
+  
+  ## Organization is the name of the organization you want to write to; must exist.
+  organization = "myorg"
+  
+  ## Destination bucket to write into.
+  bucket = "telegraf"
+
+# Or output to file for testing
+[[outputs.file]]
+  files = ["stdout"]
+  data_format = "influx"
+
+###############################################################################
+#                            INPUT PLUGINS                                    #
+###############################################################################
+
+# Read metrics from InfluxDB3 Core instance (External Plugin)
+[[inputs.execd]]
+  ## Command to run the external plugin
+  command = ["/path/to/telegraf-influxdb-input"]
+  
+  ## Environment variables to pass to the plugin
+  environment = [
+    "INFLUXDB_URL=http://localhost:8086",
+    "INFLUXDB_TOKEN=your-token-here",
+    "INFLUXDB_DATABASE=mydb",
+    "INFLUXDB_QUERY=SELECT * FROM metrics ORDER BY time DESC LIMIT 100"
+  ]
+  
+  ## Data format to consume
+  data_format = "influx"
+  
+  ## Restart policy (always, on-failure, never)
+  restart_policy = "on-failure"
+  
+  ## Restart delay
+  restart_delay = "10s"
