@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/influxdata/telegraf/metric"
+	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
 const sampleConfig = `
   ## InfluxDB3 Core instance URL
-  url = "http://localhost:8086"
+  url = "http://localhost:8181"
   
   ## API Token for authentication
   token = ""
@@ -50,20 +50,20 @@ const sampleConfig = `
 
 // InfluxDBInput represents the input plugin
 type InfluxDBInput struct {
-	URL                string          `toml:"url"`
-	Token              string          `toml:"token"`
-	Organization       string          `toml:"organization"`
-	Database           string          `toml:"database"`
-	Query              string          `toml:"query"`
-	Timeout            string          `toml:"timeout"`
-	TLSCA              string          `toml:"tls_ca"`
-	TLSCert            string          `toml:"tls_cert"`
-	TLSKey             string          `toml:"tls_key"`
-	InsecureSkipVerify bool            `toml:"insecure_skip_verify"`
-	
-	client     *http.Client
-	timeout    time.Duration
-	Log        telegraf.Logger `toml:"-"`
+	URL                string `toml:"url"`
+	Token              string `toml:"token"`
+	Organization       string `toml:"organization"`
+	Database           string `toml:"database"`
+	Query              string `toml:"query"`
+	Timeout            string `toml:"timeout"`
+	TLSCA              string `toml:"tls_ca"`
+	TLSCert            string `toml:"tls_cert"`
+	TLSKey             string `toml:"tls_key"`
+	InsecureSkipVerify bool   `toml:"insecure_skip_verify"`
+
+	client  *http.Client
+	timeout time.Duration
+	Log     telegraf.Logger `toml:"-"`
 }
 
 // Description returns a short description of the plugin
@@ -113,8 +113,8 @@ func (i *InfluxDBInput) Gather(acc telegraf.Accumulator) error {
 	}
 
 	// Add metrics to accumulator
-	for _, metric := range metrics {
-		acc.AddFields(metric.Name, metric.Fields, metric.Tags, metric.Time)
+	for _, m := range metrics {
+		acc.AddFields(m.Name, m.Fields, m.Tags, m.Time)
 	}
 
 	return nil
@@ -124,14 +124,14 @@ func (i *InfluxDBInput) Gather(acc telegraf.Accumulator) error {
 func (i *InfluxDBInput) querySQLAPI(ctx context.Context) ([]MetricData, error) {
 	// Build the SQL query URL
 	queryURL := fmt.Sprintf("%s/api/v3/query_sql", strings.TrimRight(i.URL, "/"))
-	
+
 	// Create request body
 	requestBody := map[string]interface{}{
-		"database": i.Database,
-		"query":    i.Query,
-		"format":   "json",
+		"db":     i.Database,
+		"q":      i.Query,
+		"format": "json",
 	}
-	
+
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -178,9 +178,9 @@ func (i *InfluxDBInput) querySQLAPI(ctx context.Context) ([]MetricData, error) {
 	// Convert to metrics
 	metrics := make([]MetricData, 0, len(result))
 	for _, row := range result {
-		metric := i.convertRowToMetric(row)
-		if metric != nil {
-			metrics = append(metrics, *metric)
+		m := i.convertRowToMetric(row)
+		if m != nil {
+			metrics = append(metrics, *m)
 		}
 	}
 
@@ -197,7 +197,7 @@ type MetricData struct {
 
 // convertRowToMetric converts a query result row into a metric
 func (i *InfluxDBInput) convertRowToMetric(row map[string]interface{}) *MetricData {
-	metric := &MetricData{
+	m := &MetricData{
 		Name:   "influxdb3_query_result",
 		Fields: make(map[string]interface{}),
 		Tags:   make(map[string]string),
@@ -209,10 +209,10 @@ func (i *InfluxDBInput) convertRowToMetric(row map[string]interface{}) *MetricDa
 		switch v := t.(type) {
 		case string:
 			if parsedTime, err := time.Parse(time.RFC3339, v); err == nil {
-				metric.Time = parsedTime
+				m.Time = parsedTime
 			}
 		case float64:
-			metric.Time = time.Unix(int64(v), 0)
+			m.Time = time.Unix(int64(v), 0)
 		}
 		delete(row, "time")
 	}
@@ -220,13 +220,13 @@ func (i *InfluxDBInput) convertRowToMetric(row map[string]interface{}) *MetricDa
 	// Extract measurement name if present
 	if name, ok := row["_measurement"]; ok {
 		if nameStr, ok := name.(string); ok {
-			metric.Name = nameStr
+			m.Name = nameStr
 		}
 		delete(row, "_measurement")
 	}
 
 	// Separate tags and fields
-	// InfluxDB convention: 
+	// InfluxDB convention:
 	// - String values are typically tags (metadata)
 	// - Numeric, boolean, and special field values are fields (measurements)
 	// - Fields starting with underscore (except _measurement) are special fields
@@ -235,23 +235,23 @@ func (i *InfluxDBInput) convertRowToMetric(row map[string]interface{}) *MetricDa
 		// but still add them as fields to preserve data
 		if strings.HasPrefix(key, "_") {
 			if value != nil {
-				metric.Fields[key] = value
+				m.Fields[key] = value
 			}
 		} else if strVal, ok := value.(string); ok {
 			// String values become tags
-			metric.Tags[key] = strVal
+			m.Tags[key] = strVal
 		} else {
 			// Numeric, boolean, and other types become fields
-			metric.Fields[key] = value
+			m.Fields[key] = value
 		}
 	}
 
 	// Ensure we have at least one field
-	if len(metric.Fields) == 0 {
+	if len(m.Fields) == 0 {
 		return nil
 	}
 
-	return metric
+	return m
 }
 
 // Start starts the plugin (for service inputs)
@@ -267,8 +267,8 @@ func (i *InfluxDBInput) Stop() {
 func init() {
 	inputs.Add("influxdb_input", func() telegraf.Input {
 		return &InfluxDBInput{
-			URL:      "http://localhost:8086",
-			Database: "telegraf",
+			URL:      "http://localhost:8181",
+			Database: "control",
 			Timeout:  "5s",
 		}
 	})
@@ -281,7 +281,7 @@ func main() {
 
 	// For external plugin, we need to use Telegraf's shim
 	// This allows the plugin to run as a standalone executable
-	
+
 	if *configFile != "" {
 		fmt.Printf("Using config file: %s\n", *configFile)
 	}
@@ -296,13 +296,13 @@ func main() {
 
 	// Set defaults if not provided
 	if plugin.URL == "" {
-		plugin.URL = "http://localhost:8086"
+		plugin.URL = "http://localhost:8181"
 	}
 	if plugin.Database == "" {
-		plugin.Database = "telegraf"
+		plugin.Database = "control"
 	}
 	if plugin.Query == "" {
-		plugin.Query = "SELECT * FROM metrics ORDER BY time DESC LIMIT 100"
+		plugin.Query = "SELECT * FROM opcua ORDER BY time DESC LIMIT 100"
 	}
 
 	// Initialize logger
@@ -331,10 +331,10 @@ func main() {
 // formatLineProtocol formats a metric in InfluxDB line protocol format
 func formatLineProtocol(m telegraf.Metric) string {
 	var sb strings.Builder
-	
+
 	// Write measurement name
 	sb.WriteString(m.Name())
-	
+
 	// Write tags
 	tags := m.Tags()
 	if len(tags) > 0 {
@@ -345,7 +345,7 @@ func formatLineProtocol(m telegraf.Metric) string {
 			sb.WriteString(v)
 		}
 	}
-	
+
 	// Write fields
 	sb.WriteString(" ")
 	fields := m.Fields()
@@ -370,12 +370,12 @@ func formatLineProtocol(m telegraf.Metric) string {
 			sb.WriteString(fmt.Sprintf("%v", val))
 		}
 	}
-	
+
 	// Write timestamp (in nanoseconds)
 	sb.WriteString(" ")
 	sb.WriteString(fmt.Sprintf("%d", m.Time().UnixNano()))
 	sb.WriteString("\n")
-	
+
 	return sb.String()
 }
 
@@ -440,7 +440,7 @@ func (a *simpleAccumulator) AddFields(measurement string, fields map[string]inte
 	if len(t) > 0 {
 		timestamp = t[0]
 	}
-	
+
 	m := metric.New(measurement, tags, fields, timestamp)
 	a.metrics = append(a.metrics, m)
 }
