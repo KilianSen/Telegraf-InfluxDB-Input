@@ -77,7 +77,8 @@
     "INFLUXDB_URL=http://localhost:8086",
     "INFLUXDB_TOKEN=your-token-here",
     "INFLUXDB_DATABASE=mydb",
-    "INFLUXDB_QUERY=SELECT * FROM metrics ORDER BY time DESC LIMIT 100"
+    # Use overlapping time windows - deduplication prevents duplicates
+    "INFLUXDB_QUERY=SELECT * FROM metrics WHERE time >= now() - INTERVAL '20 seconds' ORDER BY time DESC LIMIT 100"
   ]
   
   ## Data format to consume
@@ -88,3 +89,11 @@
   
   ## Restart delay
   restart_delay = "10s"
+  
+  ## Notes on Deduplication:
+  ## - Deduplication is ENABLED by default (track_new_metrics_only = true)
+  ## - Only new metrics are forwarded to outputs
+  ## - Metrics are tracked by: measurement name + tags + timestamp
+  ## - Default tracking window: 1 hour (configurable)
+  ## - Default max tracked metrics: 10000 (configurable)
+  ## - To disable: Set track_new_metrics_only = false in plugin config
