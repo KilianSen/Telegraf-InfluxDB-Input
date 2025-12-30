@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -333,14 +334,7 @@ func (i *InfluxDBInput) generateMetricKey(m MetricData) string {
 	}
 	// Sort tags to ensure consistent key generation
 	if len(tags) > 0 {
-		// Simple inline sort for tags
-		for j := 0; j < len(tags); j++ {
-			for k := j + 1; k < len(tags); k++ {
-				if tags[j] > tags[k] {
-					tags[j], tags[k] = tags[k], tags[j]
-				}
-			}
-		}
+		sort.Strings(tags)
 		sb.WriteString(strings.Join(tags, ","))
 	}
 
@@ -413,13 +407,9 @@ func (i *InfluxDBInput) evictOldestMetrics() {
 	}
 
 	// Sort by time (oldest first)
-	for j := 0; j < len(entries); j++ {
-		for k := j + 1; k < len(entries); k++ {
-			if entries[j].time.After(entries[k].time) {
-				entries[j], entries[k] = entries[k], entries[j]
-			}
-		}
-	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].time.Before(entries[j].time)
+	})
 
 	// Remove oldest entries
 	for j := 0; j < numToRemove && j < len(entries); j++ {

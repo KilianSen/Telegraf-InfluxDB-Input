@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -196,7 +197,7 @@ func TestEvictOldestMetrics(t *testing.T) {
 	// Add 110 metrics with different timestamps
 	baseTime := time.Now()
 	for i := 0; i < 110; i++ {
-		key := time.Now().String() + string(rune(i))
+		key := fmt.Sprintf("metric_%d", i)
 		plugin.seenMetrics[key] = baseTime.Add(time.Duration(i) * time.Minute)
 	}
 
@@ -290,7 +291,7 @@ func TestTrackingDisabled(t *testing.T) {
 
 	// Verify that seenMetrics map is empty (not used when tracking disabled)
 	plugin.markMetricAsSeen(m) // This should still work but won't be used
-	
+
 	if len(plugin.seenMetrics) == 0 {
 		t.Error("Expected metric to be tracked even if tracking is disabled (data structure still works)")
 	}
