@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/influxdata/telegraf"
@@ -41,6 +42,18 @@ const sampleConfig = `
   ## Timeout for HTTP requests
   timeout = "5s"
   
+  ## Only propagate new metrics (deduplication)
+  ## When enabled, tracks seen metrics and only forwards new ones
+  track_new_metrics_only = true
+  
+  ## Maximum number of metrics to track in memory (default: 10000)
+  ## Older entries are removed when limit is exceeded
+  max_tracked_metrics = 10000
+  
+  ## Time window for metric tracking (default: 1h)
+  ## Metrics older than this are removed from tracking
+  metric_tracking_window = "1h"
+  
   ## Optional TLS Config
   # tls_ca = "/etc/telegraf/ca.pem"
   # tls_cert = "/etc/telegraf/cert.pem"
@@ -50,20 +63,26 @@ const sampleConfig = `
 
 // InfluxDBInput represents the input plugin
 type InfluxDBInput struct {
-	URL                string `toml:"url"`
-	Token              string `toml:"token"`
-	Organization       string `toml:"organization"`
-	Database           string `toml:"database"`
-	Query              string `toml:"query"`
-	Timeout            string `toml:"timeout"`
-	TLSCA              string `toml:"tls_ca"`
-	TLSCert            string `toml:"tls_cert"`
-	TLSKey             string `toml:"tls_key"`
-	InsecureSkipVerify bool   `toml:"insecure_skip_verify"`
+	URL                  string `toml:"url"`
+	Token                string `toml:"token"`
+	Organization         string `toml:"organization"`
+	Database             string `toml:"database"`
+	Query                string `toml:"query"`
+	Timeout              string `toml:"timeout"`
+	TLSCA                string `toml:"tls_ca"`
+	TLSCert              string `toml:"tls_cert"`
+	TLSKey               string `toml:"tls_key"`
+	InsecureSkipVerify   bool   `toml:"insecure_skip_verify"`
+	TrackNewMetricsOnly  bool   `toml:"track_new_metrics_only"`
+	MaxTrackedMetrics    int    `toml:"max_tracked_metrics"`
+	MetricTrackingWindow string `toml:"metric_tracking_window"`
 
-	client  *http.Client
-	timeout time.Duration
-	Log     telegraf.Logger `toml:"-"`
+	client         *http.Client
+	timeout        time.Duration
+	trackingWindow time.Duration
+	seenMetrics    map[string]time.Time
+	seenMetricsMu  sync.RWMutex
+	Log            telegraf.Logger `toml:"-"`
 }
 
 // Description returns a short description of the plugin
@@ -82,6 +101,26 @@ func (i *InfluxDBInput) Init() error {
 	i.timeout, err = time.ParseDuration(i.Timeout)
 	if err != nil {
 		i.timeout = 5 * time.Second
+	}
+
+	// Parse tracking window duration
+	if i.MetricTrackingWindow != "" {
+		i.trackingWindow, err = time.ParseDuration(i.MetricTrackingWindow)
+		if err != nil {
+			i.trackingWindow = 1 * time.Hour
+		}
+	} else {
+		i.trackingWindow = 1 * time.Hour
+	}
+
+	// Set defaults for tracking configuration
+	if i.MaxTrackedMetrics == 0 {
+		i.MaxTrackedMetrics = 10000
+	}
+
+	// Initialize seen metrics map if tracking is enabled
+	if i.TrackNewMetricsOnly {
+		i.seenMetrics = make(map[string]time.Time)
 	}
 
 	// Setup TLS configuration
@@ -112,9 +151,30 @@ func (i *InfluxDBInput) Gather(acc telegraf.Accumulator) error {
 		return err
 	}
 
-	// Add metrics to accumulator
+	// Clean up old entries from seen metrics before processing new ones
+	if i.TrackNewMetricsOnly {
+		i.cleanupOldMetrics()
+	}
+
+	// Add metrics to accumulator (with deduplication if enabled)
+	newMetricsCount := 0
 	for _, m := range metrics {
-		acc.AddFields(m.Name, m.Fields, m.Tags, m.Time)
+		if i.TrackNewMetricsOnly {
+			// Check if metric is new
+			if i.isNewMetric(m) {
+				acc.AddFields(m.Name, m.Fields, m.Tags, m.Time)
+				i.markMetricAsSeen(m)
+				newMetricsCount++
+			}
+		} else {
+			// No tracking - add all metrics
+			acc.AddFields(m.Name, m.Fields, m.Tags, m.Time)
+			newMetricsCount++
+		}
+	}
+
+	if i.TrackNewMetricsOnly {
+		i.Log.Debugf("Processed %d metrics, propagated %d new metrics", len(metrics), newMetricsCount)
 	}
 
 	return nil
@@ -254,6 +314,121 @@ func (i *InfluxDBInput) convertRowToMetric(row map[string]interface{}) *MetricDa
 	return m
 }
 
+// generateMetricKey creates a unique key for a metric based on its name, tags, and timestamp
+func (i *InfluxDBInput) generateMetricKey(m MetricData) string {
+	var sb strings.Builder
+
+	// Include measurement name
+	sb.WriteString(m.Name)
+	sb.WriteString("|")
+
+	// Include timestamp (to nanosecond precision)
+	sb.WriteString(fmt.Sprintf("%d", m.Time.UnixNano()))
+	sb.WriteString("|")
+
+	// Include sorted tags for consistency
+	tags := make([]string, 0, len(m.Tags))
+	for k, v := range m.Tags {
+		tags = append(tags, fmt.Sprintf("%s=%s", k, v))
+	}
+	// Sort tags to ensure consistent key generation
+	if len(tags) > 0 {
+		// Simple inline sort for tags
+		for j := 0; j < len(tags); j++ {
+			for k := j + 1; k < len(tags); k++ {
+				if tags[j] > tags[k] {
+					tags[j], tags[k] = tags[k], tags[j]
+				}
+			}
+		}
+		sb.WriteString(strings.Join(tags, ","))
+	}
+
+	return sb.String()
+}
+
+// isNewMetric checks if a metric has been seen before
+func (i *InfluxDBInput) isNewMetric(m MetricData) bool {
+	key := i.generateMetricKey(m)
+
+	i.seenMetricsMu.RLock()
+	_, exists := i.seenMetrics[key]
+	i.seenMetricsMu.RUnlock()
+
+	return !exists
+}
+
+// markMetricAsSeen adds a metric to the seen metrics map
+func (i *InfluxDBInput) markMetricAsSeen(m MetricData) {
+	key := i.generateMetricKey(m)
+
+	i.seenMetricsMu.Lock()
+	defer i.seenMetricsMu.Unlock()
+
+	// Add metric with current timestamp
+	i.seenMetrics[key] = time.Now()
+
+	// Enforce max tracked metrics limit
+	if len(i.seenMetrics) > i.MaxTrackedMetrics {
+		i.evictOldestMetrics()
+	}
+}
+
+// cleanupOldMetrics removes metrics older than the tracking window
+func (i *InfluxDBInput) cleanupOldMetrics() {
+	i.seenMetricsMu.Lock()
+	defer i.seenMetricsMu.Unlock()
+
+	cutoffTime := time.Now().Add(-i.trackingWindow)
+	removed := 0
+
+	for key, timestamp := range i.seenMetrics {
+		if timestamp.Before(cutoffTime) {
+			delete(i.seenMetrics, key)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		i.Log.Debugf("Cleaned up %d old metric entries from tracking", removed)
+	}
+}
+
+// evictOldestMetrics removes the oldest 10% of metrics when max limit is reached
+func (i *InfluxDBInput) evictOldestMetrics() {
+	// Find the 10% oldest metrics and remove them
+	numToRemove := len(i.seenMetrics) / 10
+	if numToRemove == 0 {
+		numToRemove = 1
+	}
+
+	// Collect entries with timestamps
+	type entry struct {
+		key  string
+		time time.Time
+	}
+	entries := make([]entry, 0, len(i.seenMetrics))
+	for k, t := range i.seenMetrics {
+		entries = append(entries, entry{key: k, time: t})
+	}
+
+	// Sort by time (oldest first)
+	for j := 0; j < len(entries); j++ {
+		for k := j + 1; k < len(entries); k++ {
+			if entries[j].time.After(entries[k].time) {
+				entries[j], entries[k] = entries[k], entries[j]
+			}
+		}
+	}
+
+	// Remove oldest entries
+	for j := 0; j < numToRemove && j < len(entries); j++ {
+		delete(i.seenMetrics, entries[j].key)
+	}
+
+	i.Log.Debugf("Evicted %d oldest metrics from tracking (limit: %d)", numToRemove, i.MaxTrackedMetrics)
+}
+
 // Start starts the plugin (for service inputs)
 func (i *InfluxDBInput) Start(acc telegraf.Accumulator) error {
 	return nil
@@ -267,9 +442,10 @@ func (i *InfluxDBInput) Stop() {
 func init() {
 	inputs.Add("influxdb_input", func() telegraf.Input {
 		return &InfluxDBInput{
-			URL:      "http://localhost:8181",
-			Database: "control",
-			Timeout:  "5s",
+			URL:                 "http://localhost:8181",
+			Database:            "control",
+			Timeout:             "5s",
+			TrackNewMetricsOnly: true,
 		}
 	})
 }
@@ -288,10 +464,11 @@ func main() {
 
 	// Create plugin instance
 	plugin := &InfluxDBInput{
-		URL:      os.Getenv("INFLUXDB_URL"),
-		Token:    os.Getenv("INFLUXDB_TOKEN"),
-		Database: os.Getenv("INFLUXDB_DATABASE"),
-		Query:    os.Getenv("INFLUXDB_QUERY"),
+		URL:                 os.Getenv("INFLUXDB_URL"),
+		Token:               os.Getenv("INFLUXDB_TOKEN"),
+		Database:            os.Getenv("INFLUXDB_DATABASE"),
+		Query:               os.Getenv("INFLUXDB_QUERY"),
+		TrackNewMetricsOnly: true, // Enable by default
 	}
 
 	// Set defaults if not provided

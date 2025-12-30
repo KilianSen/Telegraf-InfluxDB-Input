@@ -11,6 +11,7 @@ An external input plugin for Telegraf that connects to an InfluxDB3-core instanc
 - ⚙️ Configurable polling intervals
 - 🛡️ TLS/SSL support
 - 📊 Automatic metric conversion to Telegraf format
+- ✨ **Smart deduplication - only propagates new metrics** (prevents duplicate data)
 
 ## Installation
 
@@ -143,11 +144,40 @@ ORDER BY bucket DESC
 
 The plugin works as follows:
 
-1. **Initialization**: Sets up HTTP client with TLS configuration
+1. **Initialization**: Sets up HTTP client with TLS configuration and initializes metric tracking
 2. **Polling**: Telegraf calls the plugin at regular intervals (configured in `agent.interval`)
 3. **Query Execution**: Plugin executes SQL query against InfluxDB3 API
 4. **Data Transformation**: Converts query results to Telegraf metrics
-5. **Output**: Returns metrics in InfluxDB line protocol format
+5. **Deduplication**: Checks each metric against seen metrics cache (enabled by default)
+6. **Output**: Returns only new metrics in InfluxDB line protocol format
+7. **Cleanup**: Periodically removes old entries from the tracking cache
+
+### Metric Deduplication
+
+By default, the plugin tracks metrics that have been propagated and only forwards new ones. This prevents duplicate data when polling overlapping time windows.
+
+**How it works:**
+- Each metric is uniquely identified by: measurement name + tags + timestamp
+- A configurable in-memory cache tracks seen metrics
+- Old entries are automatically cleaned up based on `metric_tracking_window`
+- Cache size is limited by `max_tracked_metrics` to prevent memory issues
+
+**Configuration options:**
+```toml
+## Enable/disable deduplication (default: true)
+track_new_metrics_only = true
+
+## Maximum metrics to track (default: 10000)
+max_tracked_metrics = 10000
+
+## How long to remember metrics (default: 1h)
+metric_tracking_window = "1h"
+```
+
+To disable deduplication and forward all metrics:
+```toml
+track_new_metrics_only = false
+```
 
 ## Security Considerations
 
