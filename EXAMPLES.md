@@ -30,9 +30,9 @@ Poll recent metrics from a database every 30 seconds.
   bucket = "aggregated"
 ```
 
-## Example 2: Time-Based Incremental Updates
+## Example 2: Time-Based Incremental Updates with Deduplication
 
-Query only new data since the last poll (using a rolling time window).
+Query overlapping time windows without worrying about duplicates (deduplication is enabled by default).
 
 **Telegraf Configuration:**
 ```toml
@@ -43,13 +43,14 @@ Query only new data since the last poll (using a rolling time window).
     "INFLUXDB_URL=http://localhost:8086",
     "INFLUXDB_TOKEN=mytoken123",
     "INFLUXDB_DATABASE=events",
-    "INFLUXDB_QUERY=SELECT * FROM events WHERE time >= now() - INTERVAL '1 minute' ORDER BY time DESC"
+    # Query with overlap to ensure no data is missed
+    "INFLUXDB_QUERY=SELECT * FROM events WHERE time >= now() - INTERVAL '2 minutes' ORDER BY time DESC"
   ]
   
   data_format = "influx"
 ```
 
-**Note:** With `interval = "1m"` in agent config, each run gets the last minute of data.
+**Note:** With `interval = "1m"` in agent config and a 2-minute query window, there's overlap between polls. The plugin automatically deduplicates metrics so each event is only forwarded once.
 
 ## Example 3: Multi-Measurement Aggregation
 
@@ -158,9 +159,9 @@ ORDER BY time DESC
     alert_level = "warning"
 ```
 
-## Example 6: High-Frequency Polling
+## Example 6: High-Frequency Polling with Custom Deduplication Settings
 
-Poll data every 5 seconds for real-time monitoring.
+Poll data every 5 seconds for real-time monitoring with optimized deduplication settings.
 
 **Telegraf Configuration:**
 ```toml
@@ -175,12 +176,15 @@ Poll data every 5 seconds for real-time monitoring.
     "INFLUXDB_URL=http://localhost:8086",
     "INFLUXDB_TOKEN=mytoken123",
     "INFLUXDB_DATABASE=realtime",
+    # Query with 2x overlap for safety
     "INFLUXDB_QUERY=SELECT * FROM live_metrics WHERE time >= now() - INTERVAL '10 seconds' ORDER BY time DESC LIMIT 100"
   ]
   
   data_format = "influx"
   restart_policy = "always"
 ```
+
+**Note:** High-frequency polling with overlapping windows ensures no data loss. The default deduplication settings handle the overlap efficiently. For very high volumes, consider adjusting `max_tracked_metrics`.
 
 ## Example 7: Secure Connection with TLS
 
@@ -323,11 +327,13 @@ INFLUXDB_QUERY=SELECT * FROM metrics WHERE time >= now() - INTERVAL '1 minute' L
 
 1. **Limit Query Results**: Always use `LIMIT` to prevent memory issues
 2. **Use Time Windows**: Query only recent data with `WHERE time >= now() - INTERVAL`
-3. **Index Your Queries**: Ensure InfluxDB3 has proper indexes for performance
-4. **Monitor Resource Usage**: Watch CPU and memory when polling frequently
-5. **Use Appropriate Intervals**: Match Telegraf interval to data freshness needs
-6. **Secure Tokens**: Use environment variables or secrets management
-7. **Test Queries First**: Validate SQL queries directly before adding to Telegraf
-8. **Add Contextual Tags**: Use Telegraf tags to add metadata to metrics
-9. **Handle Errors Gracefully**: Use `restart_policy = "on-failure"` for resilience
-10. **Log and Monitor**: Enable debug logging during initial setup
+3. **Use Overlapping Windows**: Query with overlap (e.g., 2-minute window with 1-minute interval) to ensure no data is missed - deduplication handles duplicates automatically
+4. **Index Your Queries**: Ensure InfluxDB3 has proper indexes for performance
+5. **Monitor Resource Usage**: Watch CPU and memory when polling frequently
+6. **Use Appropriate Intervals**: Match Telegraf interval to data freshness needs
+7. **Secure Tokens**: Use environment variables or secrets management
+8. **Test Queries First**: Validate SQL queries directly before adding to Telegraf
+9. **Add Contextual Tags**: Use Telegraf tags to add metadata to metrics
+10. **Handle Errors Gracefully**: Use `restart_policy = "on-failure"` for resilience
+11. **Log and Monitor**: Enable debug logging during initial setup
+12. **Configure Deduplication**: Adjust `max_tracked_metrics` and `metric_tracking_window` based on your data volume and polling frequency
