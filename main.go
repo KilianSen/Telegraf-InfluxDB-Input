@@ -495,6 +495,13 @@ func main() {
 	}
 }
 
+// escapeTag escapes the characters that are significant in a line-protocol tag
+// key or value: comma, equals and space (per the InfluxDB line-protocol spec).
+func escapeTag(s string) string {
+	r := strings.NewReplacer(",", `\,`, "=", `\=`, " ", `\ `)
+	return r.Replace(s)
+}
+
 // formatLineProtocol formats a metric in InfluxDB line protocol format
 func formatLineProtocol(m telegraf.Metric) string {
 	var sb strings.Builder
@@ -502,14 +509,16 @@ func formatLineProtocol(m telegraf.Metric) string {
 	// Write measurement name
 	sb.WriteString(m.Name())
 
-	// Write tags
+	// Write tags. Tag keys and values must escape commas, equals and spaces, or a
+	// value containing them (e.g. a JSON array "[1,2,3]") corrupts the line and the
+	// downstream parser rejects it.
 	tags := m.Tags()
 	if len(tags) > 0 {
 		for k, v := range tags {
 			sb.WriteString(",")
-			sb.WriteString(k)
+			sb.WriteString(escapeTag(k))
 			sb.WriteString("=")
-			sb.WriteString(v)
+			sb.WriteString(escapeTag(v))
 		}
 	}
 
