@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -495,19 +496,39 @@ func main() {
 	}
 }
 
-// escapeTag escapes the characters that are significant in a line-protocol tag
-// key or value: comma, equals and space (per the InfluxDB line-protocol spec).
-func escapeTag(s string) string {
-	r := strings.NewReplacer(",", `\,`, "=", `\=`, " ", `\ `)
-	return r.Replace(s)
-}
+// Line-protocol escaping. The three contexts below escape DIFFERENT character
+// sets, per the InfluxDB line-protocol spec — using one escaper everywhere
+// corrupts output, because a backslash before a character that does not require
+// escaping in that context is preserved literally by the parser.
+var (
+	// Measurement names escape comma and space. NOT equals: `\=` in a
+	// measurement is read back as a literal backslash-equals.
+	measurementEscaper = strings.NewReplacer(",", `\,`, " ", `\ `)
+
+	// Tag keys, tag values and field keys escape comma, equals and space. A tag
+	// value containing them (e.g. a JSON array "[1,2,3]") otherwise splits the
+	// line and the downstream parser rejects it.
+	keyEscaper = strings.NewReplacer(",", `\,`, "=", `\=`, " ", `\ `)
+
+	// String field values are double-quoted, so only the quote and the escape
+	// character itself need escaping. Backslash MUST be replaced first, or the
+	// backslashes introduced for quotes would be escaped a second time.
+	stringFieldEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+)
+
+func escapeMeasurement(s string) string { return measurementEscaper.Replace(s) }
+
+// escapeTag escapes a tag key, tag value or field key.
+func escapeTag(s string) string { return keyEscaper.Replace(s) }
+
+func escapeStringField(s string) string { return stringFieldEscaper.Replace(s) }
 
 // formatLineProtocol formats a metric in InfluxDB line protocol format
 func formatLineProtocol(m telegraf.Metric) string {
 	var sb strings.Builder
 
 	// Write measurement name
-	sb.WriteString(m.Name())
+	sb.WriteString(escapeMeasurement(m.Name()))
 
 	// Write tags. Tag keys and values must escape commas, equals and spaces, or a
 	// value containing them (e.g. a JSON array "[1,2,3]") corrupts the line and the
@@ -531,15 +552,20 @@ func formatLineProtocol(m telegraf.Metric) string {
 			sb.WriteString(",")
 		}
 		first = false
-		sb.WriteString(k)
+		sb.WriteString(escapeTag(k))
 		sb.WriteString("=")
 		switch val := v.(type) {
 		case string:
-			sb.WriteString(fmt.Sprintf("\"%s\"", val))
+			sb.WriteString(`"` + escapeStringField(val) + `"`)
 		case int, int64, int32, int16, int8:
 			sb.WriteString(fmt.Sprintf("%di", val))
-		case float64, float32:
-			sb.WriteString(fmt.Sprintf("%f", val))
+		case float64:
+			// 'g' with -1 precision round-trips exactly. %f would clamp to six
+			// decimals, silently flattening small sensor readings (1e-7 -> 0.000000)
+			// and padding large ones with noise.
+			sb.WriteString(strconv.FormatFloat(val, 'g', -1, 64))
+		case float32:
+			sb.WriteString(strconv.FormatFloat(float64(val), 'g', -1, 32))
 		case bool:
 			sb.WriteString(fmt.Sprintf("%t", val))
 		default:

@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/influxdata/telegraf/metric"
 )
 
 // TestGenerateMetricKey tests that metric keys are generated consistently
@@ -294,5 +297,84 @@ func TestTrackingDisabled(t *testing.T) {
 
 	if len(plugin.seenMetrics) == 0 {
 		t.Error("Expected metric to be tracked even if tracking is disabled (data structure still works)")
+	}
+}
+
+// TestEscapers pins the three line-protocol escaping contexts, which each cover
+// a different character set. Collapsing them into one escaper is what the
+// vendored copy in the exscada stack did, and it silently corrupts measurement
+// names containing '='.
+func TestEscapers(t *testing.T) {
+	t.Run("measurement escapes comma and space but not equals", func(t *testing.T) {
+		if got, want := escapeMeasurement(`a,b c=d`), `a\,b\ c=d`; got != want {
+			t.Errorf("escapeMeasurement = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("tag and field keys escape comma, equals and space", func(t *testing.T) {
+		if got, want := escapeTag(`a,b c=d`), `a\,b\ c\=d`; got != want {
+			t.Errorf("escapeTag = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("json array survives as a tag value", func(t *testing.T) {
+		// The seqex sequence vectors arrive as JSON arrays; unescaped commas
+		// split the line and the parser drops the row.
+		if got, want := escapeTag(`[1,2,3]`), `[1\,2\,3]`; got != want {
+			t.Errorf("escapeTag = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("string field escapes quotes and backslashes exactly once", func(t *testing.T) {
+		if got, want := escapeStringField(`say "hi"`), `say \"hi\"`; got != want {
+			t.Errorf("escapeStringField = %q, want %q", got, want)
+		}
+		// Backslash must be replaced before quotes, else this double-escapes.
+		if got, want := escapeStringField(`c:\path`), `c:\\path`; got != want {
+			t.Errorf("escapeStringField = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestFormatLineProtocolFloatPrecision guards against %f, which clamps to six
+// decimals and silently flattens small sensor readings to zero.
+func TestFormatLineProtocolFloatPrecision(t *testing.T) {
+	ts := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name  string
+		value float64
+		want  string
+	}{
+		{"small value survives", 1e-7, "1e-07"},
+		{"large value keeps magnitude", 1.5e20, "1.5e+20"},
+		{"plain value stays readable", 42.5, "42.5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := metric.New("opcua", map[string]string{"id": "P_CC"},
+				map[string]interface{}{"value": tc.value}, ts)
+			line := formatLineProtocol(m)
+			if want := "value=" + tc.want; !strings.Contains(line, want) {
+				t.Errorf("formatLineProtocol = %q, want it to contain %q", line, want)
+			}
+		})
+	}
+}
+
+// TestFormatLineProtocolEscapesTagValues is the end-to-end guard for the bug
+// that dropped seqex's sequence vectors on the floor.
+func TestFormatLineProtocolEscapesTagValues(t *testing.T) {
+	ts := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	m := metric.New("opcua_array",
+		map[string]string{"id": "Main_Sequence", "value": "[1000,0,0]"},
+		map[string]interface{}{"_keepalive": 1.0}, ts)
+
+	line := formatLineProtocol(m)
+	if !strings.Contains(line, `value=[1000\,0\,0]`) {
+		t.Errorf("tag value not escaped: %q", line)
+	}
+	// Exactly one unescaped space separates the tag set from the field set.
+	if got := strings.Count(strings.ReplaceAll(line, `\ `, ""), " "); got != 2 {
+		t.Errorf("expected 2 unescaped spaces (tags|fields|timestamp), got %d in %q", got, line)
 	}
 }
